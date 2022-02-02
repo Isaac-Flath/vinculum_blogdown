@@ -581,8 +581,8 @@ p8 <- df %>%
 ```
   
 ```{r}
-df %>%
-  select(total_sched_a,sched_b_ind,total_sched_b)
+# df %>%
+#   select(total_sched_a,sched_b_ind,total_sched_b)
 ```
 
 
