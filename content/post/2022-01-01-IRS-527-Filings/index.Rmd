@@ -1,0 +1,630 @@
+---
+title: "IRS 527 Filings"
+author: "Isaac Flath"
+categories: ["Politics"]
+tags: ["IRS", "527 Orgs"]
+date: 2022-02-01T21:13:14-05:00
+output:
+  html_document:
+    number_sections: false
+    fig_caption: true
+    toc: true
+    toc_float: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+---
+
+```{css my-header-colors, echo = FALSE}
+#header {
+    background-image: linear-gradient(120deg, lightblue, blue);
+}
+.title.toc-ignore {
+  font-weight: 1000;
+}
+h1{
+    background-image: linear-gradient(120deg, lightblue, blue);
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error=FALSE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+knitr::opts_chunk$set(out.width = "100%", fig.height=6, split=FALSE, fig.align = 'default')
+options(dplyr.summarise.inform = FALSE)
+```
+
+# Setup {.tabset .tabset-fade .tabset-pills}
+
+## Imports
+
+These are all standard imports that I use.  I haven't filtered out ones not used in this particular report, but these are my standard imports I start with on projects.
+
+```{r imports, results='hide'}
+library(DBI)
+
+# general visualisation
+library('ggplot2') # visualisation
+library('scales') # visualisation
+library('patchwork') # visualisation
+library('RColorBrewer') # visualisation
+library('corrplot') # visualisation
+library('ggthemes') # visualisation
+library('viridis') # visualisation
+library('gt') # table styling
+
+# general data manipulation
+library('dplyr') # data manipulation
+library('readr') # input/output
+library('vroom') # input/output
+library('tibble') # data wrangling
+library('tidyr') # data wrangling
+library('stringr') # string manipulation
+library('forcats') # factor manipulation
+library('janitor') # cleaning
+
+# specific
+library('glue') # encoding
+library('naniar') # missing values
+#library('gganimate') # visualisation
+library('ggrepel') # visualisation
+library('grid') # visualisation
+library('GGally') # visualisation
+library('ggforce') # visualisation
+#library('ggtext') # visualisation
+
+```
+
+## UDFs
+
+```{r udf}
+`%notin%` <- Negate(`%in%`)
+```
+
+## Download and Unzip
+
+The Data is availabe from the IRS website at this location `http://forms.irs.gov/app/pod/dataDownload/fullData`.
+
+We need to download, unzip, and then pull the file out of the nested directory path.
+
+Download and unzip the file to `FullDataFile.txt`
+
+```{r download, results='hide'}
+output_path <- "~/code_outputs"
+url = 'http://forms.irs.gov/app/pod/dataDownload/fullData'
+
+dest_path = file.path(output_path,"irs527_fullData.zip")
+if (!file.exists(dest_path)) {download.file(url,dest_path)}
+
+unzip_path = file.path(output_path,"var")
+if (!file.exists(unzip_path)){unzip(dest_path)}
+
+from = file.path(output_path,"/var/IRS/data/scripts/pofd/download/FullDataFile.txt")
+file_path = file.path(output_path,"FullDataFile.txt")
+file.copy(from,file_path)
+```
+
+## File Head
+
+From there we can look at the first few lines of the file.  We can see a few things:
+
+1. Not every row has the same number of fields.
+2. The first cell has what type of row it is
+
+This tells us that we are probably going to need to parse this row by row in some way, rather than using an out of the box read csv function.
+
+```{r comment=NA}
+lines <- readLines(file_path, n=7)
+writeLines(lines,sep="\n\n")
+```
+
+# Structure Data {.tabset .tabset-fade .tabset-pills}
+
+The structure of the file has different types of data indicated by the first letter of each row. In order to read this, we need to break it out into each files.  There are several ways to do this
+
+We additionally need to account for multi-line rows, where an individual row can span multiple lines.
+
+## Split Files
+
+First we split the file based on the first column.  The idea is to take each line and drop it into another file, but there are some complications that we need to handle.
+
+First, what would normally be a row in a dataframe is sometimes split among several lines.  Because of this we cannot simply look row by row.  To handle this we concatenate lines together while removing line breaks, and when we get to a new record start we dump it to the appropriate file.
+
+
+```{r filesplit, eval = TRUE}
+nlines <- read.table(pipe(paste("wc -l",file_path)))[[1]]
+
+line_starts <- list('H|','F|','1|','2|','A|','B|','D|','E|','R|')
+
+# open output files
+out_files <- list()
+for(line in line_starts){
+  fpath <- file.path(output_path,paste(line,'.txt'))
+  if (file.exists(fpath)) {
+    print(paste("File Already Exists:",fpath))
+    next
+    } else {
+    out_files[[line]] <- file(fpath,'w')
+    }
+}
+if(length(out_files) > 0){
+  
+  con <- file(file_path,"r")
+  
+  for(i in 0:nlines) {
+    line <- str_replace_all(str_replace_all(readLines(con, n = 1), '\r', ''), '\n', '')
+  
+    if(identical(line,character(0))){
+      writeLines(full_line, out_files[[out_type]])
+      break}
+  
+    line_type <- substr(line,1,2)
+  
+    # handle starting line
+    if(i==0){
+      full_line <- line
+      out_type <- line_type
+      next
+    }
+  
+    if(line_type %in% line_starts){
+      if(out_type %in% names(out_files)){writeLines(full_line, out_files[[out_type]])}
+      full_line <- line
+      out_type <- line_type
+    } else {
+      full_line <- paste(full_line,line)
+    }
+    if(i%%100000 == 0){print(paste(Sys.time(),'|',i,'of',nlines))}
+  }
+  # close all files
+  close(con)
+  for (f in out_files) {close(f)}
+}
+
+```
+
+## Column Map
+
+When we load into the dataframe we need to give them column names to be useful.  Because of how the files are structured, it does not include a header with column names so we need to take them from the data dictionary the provide.
+
+```{r}
+a <- c('record_type','form_id_number','sched_a_id','org_name','ein','contributor_name','contributor_address_1',
+        'contributor_address_2','contributor_address_city','contributor_address_state','contributor_address_zip_code',
+        'contributor_address_zip_ext','contributor_employer','contribution_amount','contributor_occupation',
+        'agg_contribution_ytd','contribution_date')
+
+one <- c('record_type','form_type','form_id_number','initial_report_indicator','amended_report_indicator','final_report_indicator','ein',
+        'organization_name','mailing_address_1','mailing_address_2','mailing_address_city','mailing_address_state','mailing_address_zip_code',
+        'mailing_address_zip_ext','e_mail_address','established_date','custodian_name','custodian_address_1','custodian_address_2',
+        'custodian_address_city','custodian_address_state','custodian_address_zip_code','custodian_address_zip_ext','contact_person_name',
+        'contact_address_1','contact_address_2','contact_address_city','contact_address_state','contact_address_zip_code','contact_address_zip_ext',
+        'business_address_1','business_address_2','business_address_city','business_address_state','business_address_zip_code','business_address_zip_ext',
+        'exempt_8872_indicator','exempt_state','exempt_990_indicator','purpose','material_change_date','insert_datetime','related_entity_bypass',
+        'eain_bypass')
+
+two <- c('record_type','form_type','form_id_number','period_begin_date','period_end_date','initial_report_indicator','amended_report_indicator','final_report_indicator',
+          'change_of_address_indicator','organization_name','ein','mailing_address_1','mailing_address_2','mailing_address_city','mailing_address_state','mailing_address_zip_code',
+          'mailing_address_zip_ext','e_mail_address','org_formation_date','custodian_name','custodian_address_1','custodian_address_2','custodian_address_city','custodian_address_state',
+          'custodian_address_zip_code','custodian_address_zip_ext','contact_person_name','contact_address_1','contact_address_2','contact_address_city','contact_address_state',
+          'contact_address_zip_code','contact_address_zip_ext','business_address_1','business_address_2','business_address_city','business_address_state','business_address_zip_code',
+          'business_address_zip_ext','qtr_indicator','monthly_rpt_month','pre_elect_type','pre_or_post_elect_date','pre_or_post_elect_state','sched_a_ind','total_sched_a',
+          'sched_b_ind','total_sched_b','insert_datetime')
+
+b <- c('record_type','form_id_number','sched_b_id','org_name','ein','reciepient_name','reciepient_address_1','reciepient_address_2','reciepient_address_city','reciepient_address_st',
+      'reciepient_address_zip_code','reciepient_address_zip_ext','reciepient_employer','expenditure_amount','recipient_occupation','expenditure_date','expenditure_purpose')
+
+d <- c('record_type','form_id_number','director_id','org_name','ein','entity_name','entity_title','entity_address_1','entity_address_2','entity_address_city',
+        'entity_address_st','entity_address_zip_code','entity_address_zip_code_ext')
+
+e <- c('record_type','form_id_number','eain_id','election_authority_id_number','state_issued')
+
+r <- c('record_type','form_id_number','entity_id','org_name','ein','entity_name','entity_relationship','entity_address_1','entity_address_2','entity_address_city',
+      'entity_address_st','entity_address_zip_code','entity_address_zip_ext')
+
+h <- c('record_type','transmission_date','transmission_time','file_id_modifier')
+f <- c('record_type','transmission_date','transmission_time','record_count')
+
+column_map <- list('H|'=h,
+                   'F|'=f,
+                   '1|'=one,
+                   '2|'=two,
+                   'A|'=a,
+                   'B|'=b,
+                   'D|'=d,
+                   'E|'=e,
+                   'R|'=r)         
+```
+
+# Load Files {.tabset .tabset-fade .tabset-pills}
+
+Now that we have our files split out we can handle them like normal csv files and load them into SQLite.  Let's start with loading all our data into a sqlite database and take a brief look at some of the data we have.  
+
+After that we will walk through each one and take a quick look at what's there and a few fields that peaked my interest at first glanse, though won't explore every field or go in a ton of depth
+
+```{r}
+con <- dbConnect(RSQLite::SQLite(), file.path(output_path,"irs.sqlite"))
+tables <- dbListTables(con)
+```
+
+```{r results='hide', eval=FALSE}
+load_map <- list("1|"="main_8871",
+                 'D|'="directors_officers_8871",
+                 'R|'="related_entities_8871",
+                 'E|'="eain_8871",
+                 "2|"="main_8872",
+                 "A|"="schedule_a_8872",
+                 "B|"="schedule_b_8872")
+
+for(file_pref in names(load_map)){
+  table_name <- load_map[[file_pref]]
+  if(table_name %notin% tables){
+    print(paste("Loading",file_pref,"into",table_name))
+    df <- vroom(file.path(output_path,paste(file_pref,".txt")),col_names=column_map[[file_pref]])
+    dbWriteTable(con, table_name, df, overwrite=TRUE)
+  }
+}
+
+dbListTables(con)
+```
+
+## File Metadata {.tabset .tabset-fade .tabset-pills}
+
+Each file has a header and footer row.  
+
+### Header Row
+
+The file starts with a header row that just have general data about this particular data file.
+
+```{r}
+file_pref <- 'H|'
+df <- vroom(file.path(output_path,paste(file_pref,".txt")),col_names=column_map[[file_pref]],n_max=1000)
+gt(df %>% select(-X5))
+```
+
+### Footer Row
+
+The files end with a fooder record that has data about the particular file, similar to the header.
+
+```{r}
+file_pref <- 'F|'
+df <- vroom(file.path(output_path,paste(file_pref,".txt")),col_names=column_map[[file_pref]],n_max=1000)
+gt(df %>% select(-X5))
+```
+
+## 8871 Data {.tabset .tabset-fade .tabset-pills}
+
+### 8871 Main Form
+
+The 8871 form is where 527 organizations submit data about their company.  In this header form we see a lot of basic information you would expect on any company record such as addresses, contact information, purpose, and ID numbers.
+
+
+```{r}
+df <- dbGetQuery(con, 'SELECT * FROM main_8871')
+
+df <- df %>%
+  mutate(across(c(exempt_state, business_address_state,contact_address_state,custodian_address_state,mailing_address_state,established_date), as.factor))
+# %>%
+#   mutate(across(c(initial_report_indicator, amended_report_indicator,final_report_indicator,
+#                   exempt_8872_indicator,related_entity_bypass,eain_bypass), as.logical))
+```
+
+```{r fig.height=3}
+df %>% 
+  sample_frac(0.2) %>% 
+  naniar::vis_miss()
+```
+
+```{r fig.height=3}
+p1 <- df %>% 
+  filter(!is.na(initial_report_indicator)) %>% 
+  count(initial_report_indicator) %>% 
+  ggplot(aes(initial_report_indicator, n, fill = initial_report_indicator)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "", title = "Initial Report Indicator")
+p2 <- df %>% 
+  filter(!is.na(amended_report_indicator)) %>% 
+  count(amended_report_indicator) %>% 
+  ggplot(aes(amended_report_indicator, n, fill = amended_report_indicator)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "", title = "Amended Report Indicator")
+
+p3 <- df %>% 
+  filter(!is.na(final_report_indicator)) %>% 
+  count(final_report_indicator) %>% 
+  ggplot(aes(final_report_indicator, n, fill = final_report_indicator)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "", title = "Final Report Indicator")
+
+p4 <- df %>% 
+  filter(!is.na(exempt_8872_indicator)) %>% 
+  count(exempt_8872_indicator) %>% 
+  ggplot(aes(exempt_8872_indicator, n, fill = exempt_8872_indicator)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "", title = "Exempt 8872 Indicator")
+
+p5 <- df %>% 
+  filter(!is.na(related_entity_bypass)) %>% 
+  count(related_entity_bypass) %>% 
+  ggplot(aes(related_entity_bypass, n, fill = related_entity_bypass)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "", title = "Related Entity Bypass")
+
+
+p6 <- df %>% 
+  filter(!is.na(eain_bypass)) %>% 
+  count(eain_bypass) %>% 
+  ggplot(aes(eain_bypass, n, fill = eain_bypass)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "", title = "EAIN Bypass")
+
+(p1 + p2 + p3) / (p4 + p5 + p6)
+
+```
+
+
+```{r fig.height=5}
+df %>% 
+  select(initial_report_indicator, amended_report_indicator,final_report_indicator,exempt_8872_indicator,related_entity_bypass,eain_bypass,exempt_state, business_address_state,contact_address_state,custodian_address_state,mailing_address_state) %>% 
+  replace_na(list(initial_report_indicator=-1, amended_report_indicator=-1,final_report_indicator=-1,exempt_8872_indicator=-1,related_entity_bypass=-1,eain_bypass=-1,exempt_state=-1, business_address_state=-1,contact_address_state=-1,custodian_address_state=-1,mailing_address_state=-1)) %>%
+  mutate(across(everything(), as.numeric)) %>% 
+  cor(use = "pairwise.complete.obs", method = "spearman") %>% 
+  corrplot(type = "upper", diag = FALSE, method = "square")
+```
+
+### Directors/Officers (8871)
+
+These records are included with 8871 forms and shows directors and officers of the 527 organization. Of course, there can be many directors or officers in one organization.
+
+
+```{r}
+df <- dbGetQuery(con, 'SELECT * FROM directors_officers_8871')
+```
+
+```{r fig.height=3}
+df %>% 
+  sample_frac(0.2) %>% 
+  naniar::vis_miss()
+```
+
+We can take a quick look at some of the common directors/officers to see how often they show up.  When we do that we see that all of the top 10 are directors/officers in over 100 entities!  It's hard to imagine that every one of these organizations is truly distinct and that they have had over 100 different distinct companies they work for.  It's possible that these are consultants that many companies hire to help with these organizations - definitely something to look into!
+
+```{r fig.height=3}
+df %>% 
+  mutate(entity_title=tolower(entity_title)) %>%
+  count(entity_title) %>%
+  arrange(desc(n)) %>%
+  head(20) %>%
+  mutate(entity_title=factor(entity_title,levels=entity_title)) %>%
+  ggplot(aes(entity_title, n, fill = entity_title)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none",axis.text.x = element_text(angle = 45, vjust = 1.1, hjust=1)) +
+  labs(x = "", title = "Director/Officer Titles (top 20)")
+```
+
+### Related Entities (8871)
+
+These records are included with 8871 forms and showsrelated entities to the 527 organization. Of course, there can be many related entities on one form.
+
+```{r}
+df <- dbGetQuery(con, 'SELECT * FROM related_entities_8871')
+```
+
+```{r fig.height=4}
+df %>% 
+  sample_frac(0.2) %>% 
+  naniar::vis_miss()
+```
+
+```{r, fig.height=5}
+p1 <- df %>%
+  select(entity_id,entity_name,entity_relationship,org_name) %>%
+  mutate(entity_name=tolower(entity_name),
+         entity_relationship=tolower(entity_relationship),
+         org_name=tolower(org_name)) %>%
+  count(entity_relationship) %>%
+  arrange(desc(n)) %>%
+  head(5) %>%
+  mutate(entity_relationship=factor(entity_relationship,levels=entity_relationship)) %>%
+  ggplot(aes(entity_relationship, n, fill = entity_relationship)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none",axis.text.x = element_text(angle = 45, vjust = 1.1, hjust=1)) +
+  labs(x = "", title = "Relationship Type (top 5)")
+
+
+p2 <- df %>%
+  select(ein,entity_id) %>%
+  group_by(ein) %>%
+  summarise(entity_id=n_distinct(entity_id)) %>%
+  arrange(desc(entity_id)) %>%
+  head(10) %>%
+  mutate(ein=factor(ein,levels=ein)) %>%
+  ggplot(aes(ein, entity_id, fill = ein)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none",axis.text.x = element_text(angle = 45, vjust = 1.1, hjust=1)) +
+  labs(x = "EIN", y="Entitities", title = "EINs with Related Entities (top 10)")
+
+p3 <- df %>%
+  select(form_id_number,entity_id) %>%
+  group_by(form_id_number) %>%
+  summarise(entity_cnt=n_distinct(entity_id)) %>%
+  group_by(entity_cnt) %>%
+  summarise(cnt=n_distinct(form_id_number)) %>%
+  ggplot(aes(entity_cnt, cnt, fill=cnt)) +
+  geom_bar(stat='identity') +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Entity Count", y="Freq", title = "Distribution of Qty of Related Entities Listed on a Form") +
+  facet_zoom(x=entity_cnt < 5) 
+
+(p1+p2) / p3
+```
+
+
+
+### EAIN (8871)
+
+EAIN are the Election Authority Identification numbers listed on the 8871 form.
+
+```{r}
+df <- dbGetQuery(con, 'SELECT * FROM eain_8871')
+```
+
+```{r fig.height=4}
+df %>% 
+  select(-X6) %>%
+  sample_frac(0.2) %>% 
+  naniar::vis_miss()
+```
+```{r fig.height=3}
+df %>% 
+  select(state_issued) %>%
+  count(state_issued) %>%
+  arrange(desc(n)) %>%
+  # head(5) %>%
+  mutate(state_issued=factor(state_issued,levels=state_issued)) %>%
+  ggplot(aes(state_issued, n, fill = state_issued)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none",axis.text.x = element_text(angle = 45, vjust = 1.1, hjust=1)) +
+  labs(x = "", title = "State Issued")
+```
+
+## 8872 Data  {.tabset .tabset-fade .tabset-pills}
+
+### 8872 Main Form
+
+```{r}
+df <- dbGetQuery(con, 'SELECT * FROM main_8872')
+```
+
+```{r fig.height=4}
+df %>% 
+  sample_frac(0.2) %>% 
+  naniar::vis_miss()
+```
+
+```{r}
+df <- df %>%
+  select(period_begin_date,period_end_date,initial_report_indicator,amended_report_indicator,final_report_indicator,change_of_address_indicator,ein,org_formation_date,mailing_address_state,qtr_indicator,monthly_rpt_month,pre_elect_type,pre_or_post_elect_date,pre_or_post_elect_state,sched_a_ind,total_sched_a,sched_b_ind,total_sched_b)
+
+p1 <- df %>% 
+  filter(!is.na(initial_report_indicator)) %>% 
+  count(initial_report_indicator) %>% 
+  ggplot(aes(initial_report_indicator, n, fill = initial_report_indicator)) +
+  geom_col() + theme_minimal() + theme(legend.position = "none") +
+  labs(x = "", title = "Initial Report Indicator")
+
+p2 <- df %>% 
+  filter(!is.na(amended_report_indicator)) %>% 
+  count(amended_report_indicator) %>% 
+  ggplot(aes(amended_report_indicator, n, fill = amended_report_indicator)) +
+  geom_col() + theme_minimal() + theme(legend.position = "none") +
+  labs(x = "", title = "Amended Report Indicator")
+
+p3 <- df %>% 
+  filter(!is.na(final_report_indicator)) %>% 
+  count(final_report_indicator) %>% 
+  ggplot(aes(final_report_indicator, n, fill = final_report_indicator)) +
+  geom_col() + theme_minimal() + theme(legend.position = "none") +
+  labs(x = "", title = "Final Report Indicator")
+
+p4 <- df %>% 
+  filter(!is.na(change_of_address_indicator)) %>% 
+  count(change_of_address_indicator) %>% 
+  ggplot(aes(change_of_address_indicator, n, fill = change_of_address_indicator)) +
+  geom_col() + theme_minimal() + theme(legend.position = "none") +
+  labs(x = "", title = "Change of Address Indicator")
+
+p6 <- df %>% 
+  select(mailing_address_state) %>%
+  count(mailing_address_state) %>%
+  arrange(desc(n)) %>%
+  mutate(mailing_address_state=factor(mailing_address_state,levels=mailing_address_state)) %>%
+  ggplot(aes(mailing_address_state, n, fill = mailing_address_state)) +
+  geom_col() + theme_minimal() +
+  theme(legend.position = "none",axis.text.x = element_text(angle = 45, vjust = 1.1, hjust=1)) +
+  labs(x = "", title = "Mailing State")
+
+p7 <- df %>% 
+  filter(!is.na(sched_a_ind)) %>% 
+  count(sched_a_ind) %>% 
+  ggplot(aes(sched_a_ind, n, fill = sched_a_ind)) +
+  geom_col() + theme_minimal() + theme(legend.position = "none") +
+  labs(x = "", title = "Schedule B Indicator")
+
+p8 <- df %>% 
+  filter(!is.na(sched_b_ind)) %>% 
+  count(sched_b_ind) %>% 
+  ggplot(aes(sched_b_ind, n, fill = sched_b_ind)) +
+  geom_col() + theme_minimal() + theme(legend.position = "none") +
+  labs(x = "", title = "Schedule A Indicator")
+
+(p1 + p2 + p3) / (p4 + p7 + p8) / (p6)
+```
+  
+```{r}
+df %>%
+  select(total_sched_a,sched_b_ind,total_sched_b)
+```
+
+
+### Schedule A's (8872)
+
+
+```{r}
+# df <- dbGetQuery(con, 'SELECT * FROM schedule_a_8872')
+```
+
+```{r fig.height=4}
+# df %>% 
+#   sample_frac(0.01) %>% 
+#   naniar::vis_miss()
+```
+
+```{r}
+# names(df)
+```
+
+### Schedule B's (8872)
+
+```{r}
+# df <- dbGetQuery(con, 'SELECT * FROM schedule_b_8872')
+```
+
+```{r fig.height=4}
+# df %>% 
+#   sample_frac(0.01) %>% 
+#   naniar::vis_miss()
+```
+
+# Combined Tables EDA
+
+# Disconnect from the database
+
+Always important to do!
+
+```{r}
+dbDisconnect(con)
+```
+
+
+
+
