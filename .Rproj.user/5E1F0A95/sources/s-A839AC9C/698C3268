@@ -1,11 +1,11 @@
 {
     "id": "698C3268",
-    "path": "~/github/vinculum_blogdown/netlify.toml",
+    "path": "~/vinculum_blogdown/netlify.toml",
     "project_path": "netlify.toml",
     "type": "toml",
     "hash": "0",
     "contents": "",
-    "dirty": true,
+    "dirty": false,
     "created": 1643767362654.0,
     "source_on_save": false,
     "relative_order": 3,
@@ -16,11 +16,11 @@
         "scrollLine": "0"
     },
     "folds": "",
-    "lastKnownWriteTime": 1643766413,
+    "lastKnownWriteTime": 1643769797,
     "encoding": "UTF-8",
     "collab_server": "",
     "source_window": "",
-    "last_content_update": 1643767373081,
+    "last_content_update": 1643769797,
     "read_only": false,
     "read_only_alternatives": []
 }
